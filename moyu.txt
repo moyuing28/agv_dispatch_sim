@@ -25,6 +25,11 @@ python -m pip install \
     pytest
 
 
+git使用
+git add .
+git commit -m "说明这次改了什么"
+git push
+
 
 使用
 conda activate agv-sim
