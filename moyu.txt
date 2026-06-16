@@ -1,0 +1,47 @@
+安装基础工具
+sudo apt update
+sudo apt install -y git curl
+
+安装 Miniconda(不要开梯子)
+cd ~/Downloads
+
+curl -O https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+
+bash Miniconda3-latest-Linux-x86_64.sh
+
+创建独立虚拟环境
+conda create -n agv-sim python=3.11 -y
+
+安装第一批仿真依赖
+python -m pip install --upgrade pip
+
+python -m pip install \
+    simpy \
+    "networkx[default]" \
+    numpy \
+    pandas \
+    matplotlib \
+    pyyaml \
+    pytest
+
+
+
+使用
+conda activate agv-sim
+cd ~/projects/agv_dispatch_sim
+
+python smoke_test.py
+python smoke_test_arc_demo.py
+
+python experiments/run_v01.py --policy fcfs --quiet
+python experiments/run_v01.py --policy nearest --quiet
+
+python visualization/plot_road_network.py
+python visualization/plot_road_network.py --hide-edge-lengths
+python visualization/plot_road_network.py --hide-node-labels
+
+python visualization/animate_v01.py --policy nearest
+python visualization/animate_v01.py --policy fcfs
+python visualization/animate_v01.py --policy nearest --hide-node-labels
+python visualization/animate_v01.py --policy nearest --hide-edge-lengths
+python visualization/animate_v01.py --policy nearest --hide-node-labels --hide-edge-lengths

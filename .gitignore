@@ -1,0 +1,23 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# virtual environment
+.venv/
+venv/
+env/
+agv-sim/
+
+# outputs
+outputs/
+*.csv
+*.png
+*.gif
+
+# vscode
+.vscode/
+
+# system
+.DS_Store
