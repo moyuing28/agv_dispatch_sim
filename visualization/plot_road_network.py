@@ -15,6 +15,12 @@ if str(PROJECT_ROOT) not in sys.path:
 from simulator.road_network import build_demo_network, point_at_fraction
 
 
+# 和动画脚本保持一致：道路统一为蓝色。
+ROAD_COLOR = "#1f77b4"
+ROAD_LINE_WIDTH = 1.8
+NODE_COLOR = "#f2f2f2"
+
+
 def draw_network_with_geometry(
     graph,
     positions,
@@ -35,7 +41,14 @@ def draw_network_with_geometry(
         xs = [p[0] for p in points]
         ys = [p[1] for p in points]
 
-        ax.plot(xs, ys, linewidth=1.8)
+        ax.plot(
+            xs,
+            ys,
+            color=ROAD_COLOR,
+            linewidth=ROAD_LINE_WIDTH,
+            solid_capstyle="round",
+            zorder=1,
+        )
 
         if show_edge_lengths:
             label_x, label_y = point_at_fraction(points, fraction=0.5)
@@ -47,25 +60,30 @@ def draw_network_with_geometry(
                 ha="center",
                 va="center",
                 bbox=dict(facecolor="white", edgecolor="none", alpha=0.75),
+                zorder=3,
             )
 
-    nx.draw_networkx_nodes(
+    node_collection = nx.draw_networkx_nodes(
         graph,
         pos=positions,
         node_size=100,
+        node_color=NODE_COLOR,
         edgecolors="black",
         linewidths=0.8,
         ax=ax,
     )
+    node_collection.set_zorder(4)
 
     if show_node_labels:
-        nx.draw_networkx_labels(
+        label_artists = nx.draw_networkx_labels(
             graph,
             pos=positions,
             font_size=6,
             font_weight="bold",
             ax=ax,
         )
+        for label in label_artists.values():
+            label.set_zorder(5)
 
     all_points = []
     for points in edge_geometry.values():

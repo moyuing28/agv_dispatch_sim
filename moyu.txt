@@ -32,8 +32,9 @@ git push
 
 
 使用
-conda activate agv-sim
 cd ~/projects/agv_dispatch_sim
+conda activate agv-sim
+tree -L 2
 
 python smoke_test.py
 python smoke_test_arc_demo.py
