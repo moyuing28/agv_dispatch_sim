@@ -4,7 +4,7 @@ from .base_policy import DispatchPolicy
 class FCFSPolicy(DispatchPolicy):
     name = "fcfs"
 
-    def dispatch(self, graph, idle_agvs, waiting_tasks):
+    def dispatch(self, graph, idle_agvs, waiting_tasks, planner=None, now: float = 0.0):
         if not idle_agvs or not waiting_tasks:
             return None
 

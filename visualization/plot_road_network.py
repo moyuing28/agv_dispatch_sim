@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -19,6 +20,32 @@ from simulator.road_network import build_demo_network, point_at_fraction
 ROAD_COLOR = "#1f77b4"
 ROAD_LINE_WIDTH = 1.8
 NODE_COLOR = "#f2f2f2"
+
+
+def resolve_run_dir(run_dir_arg: str | None) -> Path | None:
+    if run_dir_arg:
+        run_dir = Path(run_dir_arg)
+        if not run_dir.is_absolute():
+            run_dir = PROJECT_ROOT / run_dir
+        return run_dir
+
+    latest_path = PROJECT_ROOT / "outputs" / "latest_run.json"
+    if latest_path.exists():
+        with latest_path.open("r", encoding="utf-8") as f:
+            latest = json.load(f)
+        return Path(latest["run_dir"])
+
+    return None
+
+
+def read_run_config(run_dir: Path | None) -> dict:
+    if run_dir is None:
+        return {}
+    config_path = run_dir / "config.json"
+    if not config_path.exists():
+        return {"run_id": run_dir.name}
+    with config_path.open("r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def draw_network_with_geometry(
@@ -114,14 +141,19 @@ def draw_network_with_geometry(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--run-dir",
+        default=None,
+        help="实验输出目录。若不指定，优先读取 outputs/latest_run.json。",
+    )
+    parser.add_argument(
         "--map",
-        default="configs.demo_map",
-        help="地图配置模块，例如 configs.demo_map",
+        default=None,
+        help="地图配置模块，例如 configs.demo_map。若不指定，优先从 run_dir/config.json 读取。",
     )
     parser.add_argument(
         "--output",
-        default=str(PROJECT_ROOT / "outputs" / "v01_road_network.png"),
-        help="输出图片路径",
+        default=None,
+        help="输出图片路径。若不指定，有 run_dir 时保存到 run_dir/figures/road_network.png，否则保存到 outputs/figures/road_network.png。",
     )
     parser.add_argument(
         "--hide-node-labels",
@@ -135,23 +167,36 @@ def main():
     )
 
     args = parser.parse_args()
+    run_dir = resolve_run_dir(args.run_dir)
+    config = read_run_config(run_dir)
+    map_module = args.map or config.get("map") or config.get("args", {}).get("map") or "configs.demo_map"
+    run_id = config.get("run_id", run_dir.name if run_dir else map_module)
 
     graph, positions, edge_geometry = build_demo_network(
         return_geometry=True,
-        map_module=args.map,
+        map_module=map_module,
     )
+
+    if args.output:
+        output_path = Path(args.output)
+        if not output_path.is_absolute():
+            output_path = PROJECT_ROOT / output_path
+    elif run_dir is not None:
+        output_path = run_dir / "figures" / "road_network.png"
+    else:
+        output_path = PROJECT_ROOT / "outputs" / "figures" / "road_network.png"
 
     draw_network_with_geometry(
         graph=graph,
         positions=positions,
         edge_geometry=edge_geometry,
-        output_path=args.output,
+        output_path=output_path,
         show_node_labels=not args.hide_node_labels,
         show_edge_lengths=not args.hide_edge_lengths,
-        title=f"AGV Road Network | {args.map}",
+        title=f"AGV Road Network | {run_id}",
     )
 
-    print(f"路网图片已保存：{args.output}")
+    print(f"路网图片已保存：{output_path}")
     print(f"节点数量：{graph.number_of_nodes()}")
     print(f"有向边数量：{graph.number_of_edges()}")
 

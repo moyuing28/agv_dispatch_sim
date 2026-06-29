@@ -187,14 +187,15 @@ def build_graph_from_defs(positions, edge_defs):
 
     for edge in edge_defs:
         u, v, points, length = _edge_points_and_length(positions, edge)
+        kind = edge["kind"]
         weight = float(edge.get("weight", length))
 
-        graph.add_edge(u, v, length=round(length, 3), weight=round(weight, 3))
+        graph.add_edge(u, v, length=round(length, 3), weight=round(weight, 3), kind=kind)
         edge_geometry[(u, v)] = points
 
         # 默认双向。若以后有单行道，可在配置里写 bidirectional=False。
         if edge.get("bidirectional", True):
-            graph.add_edge(v, u, length=round(length, 3), weight=round(weight, 3))
+            graph.add_edge(v, u, length=round(length, 3), weight=round(weight, 3), kind=kind)
             edge_geometry[(v, u)] = list(reversed(points))
 
     return graph, edge_geometry

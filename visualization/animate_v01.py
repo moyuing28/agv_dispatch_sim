@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import ast
+import json
 import sys
 from pathlib import Path
 
@@ -9,6 +9,7 @@ import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 import networkx as nx
 import pandas as pd
+from pandas.errors import EmptyDataError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -43,40 +44,68 @@ AGV_COLOR_PALETTE = [
 ]
 
 
+def resolve_run_dir(run_dir_arg: str | None) -> Path:
+    if run_dir_arg:
+        run_dir = Path(run_dir_arg)
+        if not run_dir.is_absolute():
+            run_dir = PROJECT_ROOT / run_dir
+        return run_dir
+
+    latest_path = PROJECT_ROOT / "outputs" / "latest_run.json"
+    if not latest_path.exists():
+        raise FileNotFoundError(
+            f"找不到 {latest_path}\n"
+            "请先运行 experiments/run_v01.py，或手动指定 --run-dir outputs/runs/某个实验目录。"
+        )
+
+    with latest_path.open("r", encoding="utf-8") as f:
+        latest = json.load(f)
+
+    run_dir = Path(latest["run_dir"])
+    if not run_dir.is_absolute():
+        run_dir = PROJECT_ROOT / run_dir
+    return run_dir
+
+
+def read_run_config(run_dir: Path) -> dict:
+    config_path = run_dir / "config.json"
+    if not config_path.exists():
+        return {"run_id": run_dir.name, "map": "configs.demo_map"}
+    with config_path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def read_csv_or_empty(path: Path) -> pd.DataFrame:
+    """读取 CSV；文件不存在或为空时返回空 DataFrame。"""
+    if not path.exists() or path.stat().st_size <= 1:
+        return pd.DataFrame()
+
+    try:
+        return pd.read_csv(path)
+    except EmptyDataError:
+        return pd.DataFrame()
+
+
+def to_float(value, default: float = 0.0) -> float:
+    try:
+        if pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
 def get_agv_color(agv_id: str, agv_index: int) -> str:
     """按 AGV 顺序分配固定颜色，保证每帧颜色不变。"""
     return AGV_COLOR_PALETTE[agv_index % len(AGV_COLOR_PALETTE)]
 
 
-def interpolate_on_path(graph, positions, edge_geometry, path, progress):
-    """根据 progress 在真实几何路径上插值。"""
-    if len(path) == 1:
-        return positions[path[0]]
-
-    edge_lengths = [float(graph[u][v]["length"]) for u, v in zip(path[:-1], path[1:])]
-    total_length = sum(edge_lengths)
-
-    if total_length <= 0:
-        return positions[path[-1]]
-
-    target_distance = progress * total_length
-    traveled = 0.0
-
-    for i, length in enumerate(edge_lengths):
-        u = path[i]
-        v = path[i + 1]
-
-        if traveled + length >= target_distance:
-            remain = target_distance - traveled
-            points = edge_geometry[(u, v)]
-            display_len = polyline_length(points)
-            if length <= 0:
-                return points[-1]
-            return point_at_distance(points, display_len * remain / length)
-
-        traveled += length
-
-    return positions[path[-1]]
+def edge_position(edge_geometry, u: str, v: str, progress: float):
+    """根据 progress 在一条真实几何边上插值。"""
+    progress = max(0.0, min(1.0, float(progress)))
+    points = edge_geometry[(str(u), str(v))]
+    display_len = polyline_length(points)
+    return point_at_distance(points, display_len * progress)
 
 
 def remaining_points_from_distance(points, distance):
@@ -113,102 +142,201 @@ def remaining_points_from_distance(points, distance):
     return [points[-1]]
 
 
-def draw_remaining_planned_path(ax, graph, edge_geometry, path, progress):
-    """
-    高亮 AGV 当前记录中“未来还要走”的路径。
-
-    progress 表示当前 travel record 已完成比例：
-    - 已经走过的边不再高亮，因为底图会重新画成普通蓝色；
-    - 当前所在边只高亮当前位置到该边终点；
-    - 后续边整段高亮。
-    """
-    if not path or len(path) < 2:
+def draw_edge_points(ax, points):
+    if len(points) < 2:
         return
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    ax.plot(
+        xs,
+        ys,
+        color=HIGHLIGHT_COLOR,
+        linewidth=HIGHLIGHT_LINE_WIDTH,
+        solid_capstyle="round",
+        zorder=3,
+    )
 
-    progress = max(0.0, min(1.0, float(progress)))
-    edge_lengths = [float(graph[u][v]["length"]) for u, v in zip(path[:-1], path[1:])]
-    total_length = sum(edge_lengths)
 
-    if total_length <= 0:
-        return
+def draw_remaining_edge(ax, edge_geometry, u: str, v: str, progress: float):
+    """高亮当前边从 AGV 当前位置到终点的剩余部分。"""
+    points = edge_geometry[(str(u), str(v))]
+    display_len = polyline_length(points)
+    remaining = remaining_points_from_distance(points, display_len * max(0.0, min(1.0, progress)))
+    draw_edge_points(ax, remaining)
 
-    target_distance = progress * total_length
-    traveled = 0.0
 
-    for i, edge_length in enumerate(edge_lengths):
-        u = path[i]
-        v = path[i + 1]
-        edge_start = traveled
-        edge_end = traveled + edge_length
-        points = edge_geometry[(u, v)]
+def draw_full_edge(ax, edge_geometry, u: str, v: str):
+    """高亮完整边。"""
+    points = edge_geometry[(str(u), str(v))]
+    draw_edge_points(ax, points)
 
-        # 这条边已经完全走过，不画高亮。
-        if target_distance >= edge_end:
-            traveled = edge_end
+
+def make_edge_event(row: dict) -> dict:
+    return {
+        "event_type": "edge",
+        "route_id": row.get("route_id", ""),
+        "agv_id": row.get("agv_id", ""),
+        "task_id": row.get("task_id", ""),
+        "mode": row.get("mode", ""),
+        "start_time": to_float(row.get("start_time")),
+        "end_time": to_float(row.get("end_time")),
+        "from_node": str(row.get("from_node")),
+        "to_node": str(row.get("to_node")),
+        "edge_index": int(to_float(row.get("edge_index"), 0)),
+        "edge_key": row.get("edge_key", ""),
+    }
+
+
+def make_wait_event(row: dict) -> dict:
+    return {
+        "event_type": "wait",
+        "route_id": row.get("route_id", ""),
+        "agv_id": row.get("agv_id", ""),
+        "task_id": row.get("task_id", ""),
+        "mode": row.get("mode", ""),
+        "start_time": to_float(row.get("wait_start_time")),
+        "end_time": to_float(row.get("wait_end_time")),
+        "node": str(row.get("node")),
+        "node_index": int(to_float(row.get("node_index"), 0)),
+        "before_edge_key": row.get("before_edge_key", ""),
+    }
+
+
+def build_agv_events(edge_df: pd.DataFrame, wait_df: pd.DataFrame, agvs) -> dict[str, list[dict]]:
+    """把 route_edges 和 route_waits 合并成每辆 AGV 的时间事件序列。"""
+    agv_events = {agv.id: [] for agv in agvs}
+
+    if not edge_df.empty:
+        for row in edge_df.to_dict("records"):
+            agv_id = row.get("agv_id")
+            if agv_id in agv_events:
+                agv_events[agv_id].append(make_edge_event(row))
+
+    if not wait_df.empty:
+        for row in wait_df.to_dict("records"):
+            agv_id = row.get("agv_id")
+            if agv_id in agv_events:
+                event = make_wait_event(row)
+                # wait_time 为 0 的记录不需要显示。
+                if event["end_time"] > event["start_time"]:
+                    agv_events[agv_id].append(event)
+
+    for agv_id, events in agv_events.items():
+        # 同一时刻先显示 wait，再显示 edge；正常情况下 wait_end == edge_start，下一帧进入边。
+        events.sort(key=lambda e: (e["start_time"], e["end_time"], 0 if e["event_type"] == "wait" else 1))
+
+    return agv_events
+
+
+def build_route_edges(edge_df: pd.DataFrame) -> dict[str, list[dict]]:
+    """按 route_id 组织边记录，用于绘制当前路线的剩余高亮。"""
+    route_edges: dict[str, list[dict]] = {}
+    if edge_df.empty:
+        return route_edges
+
+    for row in edge_df.to_dict("records"):
+        route_id = row.get("route_id", "")
+        if not route_id:
             continue
+        edge = make_edge_event(row)
+        route_edges.setdefault(route_id, []).append(edge)
 
-        # 这条边还没开始走，整条边高亮。
-        if target_distance <= edge_start:
-            remaining_points = points
-        else:
-            # AGV 正在这条边上，只画当前位置到终点的剩余部分。
-            display_len = polyline_length(points)
-            if edge_length <= 0:
-                remaining_points = [points[-1]]
-            else:
-                distance_on_display_edge = display_len * (target_distance - edge_start) / edge_length
-                remaining_points = remaining_points_from_distance(points, distance_on_display_edge)
+    for edges in route_edges.values():
+        edges.sort(key=lambda e: (e["edge_index"], e["start_time"], e["end_time"]))
 
-        if len(remaining_points) >= 2:
-            xs = [p[0] for p in remaining_points]
-            ys = [p[1] for p in remaining_points]
-            ax.plot(
-                xs,
-                ys,
-                color=HIGHLIGHT_COLOR,
-                linewidth=HIGHLIGHT_LINE_WIDTH,
-                solid_capstyle="round",
-                zorder=3,
-            )
-
-        traveled = edge_end
+    return route_edges
 
 
-def get_agv_state_at_time(graph, positions, edge_geometry, records, agv_start_node, t):
-    """根据轨迹记录，计算某辆 AGV 在 t 时刻的位置、状态和当前正在执行的路径。"""
+def get_agv_state_at_time(positions, edge_geometry, events: list[dict], agv_start_node: str, t: float):
+    """
+    根据 route_edges + route_waits 计算某辆 AGV 在 t 时刻的位置和状态。
+
+    edge 事件：AGV 在边上移动；
+    wait 事件：AGV 停在等待节点；
+    没有活动事件时，保持在上一条边的终点或起始节点。
+    """
     current_position = positions[agv_start_node]
     current_label = "IDLE"
-    active_record = None
-    active_progress = 0.0
+    active_event = None
 
-    for record in records:
-        path = record["path"]
-        start_time = float(record["start_time"])
-        end_time = float(record["end_time"])
-        mode = record["mode"]
-        task_id = record["task_id"]
+    for event in events:
+        start_time = float(event["start_time"])
+        end_time = float(event["end_time"])
 
         if t < start_time:
             break
 
         if start_time <= t <= end_time:
-            active_progress = 1.0 if end_time == start_time else (t - start_time) / (end_time - start_time)
-            current_position = interpolate_on_path(
-                graph=graph,
-                positions=positions,
-                edge_geometry=edge_geometry,
-                path=path,
-                progress=active_progress,
-            )
-            current_label = f"{mode}-{task_id}"
-            active_record = record
-            return current_position, current_label, active_record, active_progress
+            task_id = event.get("task_id", "")
+            mode = event.get("mode", "")
+
+            if event["event_type"] == "edge":
+                duration = end_time - start_time
+                progress = 1.0 if duration <= 0 else (t - start_time) / duration
+                current_position = edge_position(
+                    edge_geometry=edge_geometry,
+                    u=event["from_node"],
+                    v=event["to_node"],
+                    progress=progress,
+                )
+                current_label = f"{mode}-{task_id}"
+                active_event = dict(event)
+                active_event["progress"] = progress
+                return current_position, current_label, active_event
+
+            if event["event_type"] == "wait":
+                current_position = positions[event["node"]]
+                current_label = f"WAIT-{mode}-{task_id}"
+                active_event = dict(event)
+                active_event["progress"] = 0.0
+                return current_position, current_label, active_event
 
         if t > end_time:
-            current_position = positions[path[-1]]
+            if event["event_type"] == "edge":
+                current_position = positions[event["to_node"]]
+            elif event["event_type"] == "wait":
+                current_position = positions[event["node"]]
             current_label = "IDLE"
 
-    return current_position, current_label, active_record, active_progress
+    return current_position, current_label, active_event
+
+
+def draw_remaining_route(ax, edge_geometry, route_edges: dict[str, list[dict]], active_event: dict | None, t: float):
+    """高亮当前 route_id 中还没走完的边。"""
+    if active_event is None:
+        return
+
+    route_id = active_event.get("route_id", "")
+    if not route_id or route_id not in route_edges:
+        return
+
+    for edge in route_edges[route_id]:
+        edge_start = float(edge["start_time"])
+        edge_end = float(edge["end_time"])
+
+        # 这条边已经走完，不再高亮。
+        if edge_end < t:
+            continue
+
+        # 正在这条边上，画当前位置到终点。
+        if active_event["event_type"] == "edge" and edge.get("edge_key") == active_event.get("edge_key"):
+            draw_remaining_edge(
+                ax=ax,
+                edge_geometry=edge_geometry,
+                u=edge["from_node"],
+                v=edge["to_node"],
+                progress=float(active_event.get("progress", 0.0)),
+            )
+            continue
+
+        # 当前处于等待状态，或者这条边还没开始走：整条边都是未来路径。
+        if edge_start >= t:
+            draw_full_edge(
+                ax=ax,
+                edge_geometry=edge_geometry,
+                u=edge["from_node"],
+                v=edge["to_node"],
+            )
 
 
 def draw_network(ax, graph, positions, edge_geometry, show_node_labels=True, show_edge_lengths=True):
@@ -264,23 +392,41 @@ def draw_network(ax, graph, positions, edge_geometry, show_node_labels=True, sho
             label.set_zorder(5)
 
 
+def get_max_time(*dfs: pd.DataFrame) -> float:
+    candidates: list[float] = []
+    for df in dfs:
+        if df.empty:
+            continue
+        for col in ["end_time", "wait_end_time", "finish_time"]:
+            if col in df.columns:
+                values = pd.to_numeric(df[col], errors="coerce").dropna()
+                if not values.empty:
+                    candidates.append(float(values.max()))
+    return max(candidates) if candidates else 0.0
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--run-dir",
+        default=None,
+        help="实验输出目录，例如 outputs/runs/v01_nearest_time_stepwise。默认读取 outputs/latest_run.json。",
+    )
+    parser.add_argument(
         "--policy",
         choices=["fcfs", "nearest"],
-        default="nearest",
-        help="选择要可视化的策略",
+        default=None,
+        help="兼容旧版本参数；新版本优先使用 --run-dir 或 latest_run.json。",
     )
     parser.add_argument(
         "--map",
-        default="configs.demo_map",
-        help="地图配置模块，例如 configs.demo_map",
+        default=None,
+        help="地图配置模块。若不指定，优先从 run_dir/config.json 读取。",
     )
     parser.add_argument(
         "--interval",
         type=int,
-        default=300,
+        default=10,
         help="动画帧间隔，单位毫秒",
     )
     parser.add_argument(
@@ -288,6 +434,11 @@ def main():
         type=float,
         default=2.0,
         help="仿真时间采样步长，单位秒",
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="动画输出路径。若不指定，保存到 run_dir/figures/animation.gif。",
     )
     parser.add_argument(
         "--hide-node-labels",
@@ -302,33 +453,41 @@ def main():
 
     args = parser.parse_args()
 
-    graph, positions, edge_geometry = build_demo_network(return_geometry=True, map_module=args.map)
+    run_dir = resolve_run_dir(args.run_dir)
+    config = read_run_config(run_dir)
+    map_module = args.map or config.get("map") or config.get("args", {}).get("map") or "configs.demo_map"
+    run_id = config.get("run_id", run_dir.name)
+
+    graph, positions, edge_geometry = build_demo_network(return_geometry=True, map_module=map_module)
     agvs = build_agvs()
 
-    travel_path = PROJECT_ROOT / "outputs" / f"v01_travels_{args.policy}.csv"
+    edge_path = run_dir / "route_edges.csv"
+    wait_path = run_dir / "route_waits.csv"
+    travel_path = run_dir / "travels.csv"
 
-    if not travel_path.exists():
+    edge_df = read_csv_or_empty(edge_path)
+    wait_df = read_csv_or_empty(wait_path)
+    travel_df = read_csv_or_empty(travel_path)
+
+    if edge_df.empty:
         raise FileNotFoundError(
-            f"找不到轨迹文件：{travel_path}\n"
-            f"请先运行：python experiments/run_v01.py --policy {args.policy}"
+            f"找不到可用的逐边轨迹文件：{edge_path}\n"
+            "请用 normal 或 debug 输出级别重新运行实验，例如：\n"
+            "python experiments/run_v01.py --policy nearest --cost-model time --traffic-mode stepwise --output-level normal --quiet"
         )
 
-    df = pd.read_csv(travel_path)
+    required_edge_cols = {"agv_id", "route_id", "from_node", "to_node", "start_time", "end_time"}
+    missing = required_edge_cols - set(edge_df.columns)
+    if missing:
+        raise RuntimeError(f"route_edges.csv 缺少必要列：{sorted(missing)}")
 
-    if df.empty:
-        raise RuntimeError("轨迹文件为空，无法生成动画。")
+    agv_events = build_agv_events(edge_df=edge_df, wait_df=wait_df, agvs=agvs)
+    route_edges = build_route_edges(edge_df=edge_df)
 
-    df["path"] = df["path"].apply(ast.literal_eval)
+    max_time = get_max_time(edge_df, wait_df, travel_df)
+    if max_time <= 0:
+        raise RuntimeError("没有可用的动画时间范围，请检查 route_edges.csv。")
 
-    agv_records = {}
-    for agv in agvs:
-        agv_records[agv.id] = (
-            df[df["agv_id"] == agv.id]
-            .sort_values("start_time")
-            .to_dict("records")
-        )
-
-    max_time = float(df["end_time"].max())
     times = list(pd.Series([i * args.step for i in range(int(max_time / args.step) + 2)]))
 
     all_points = []
@@ -360,28 +519,26 @@ def main():
 
         active_states = []
         for agv in agvs:
-            pos, state_label, active_record, active_progress = get_agv_state_at_time(
-                graph=graph,
+            pos, state_label, active_event = get_agv_state_at_time(
                 positions=positions,
                 edge_geometry=edge_geometry,
-                records=agv_records[agv.id],
+                events=agv_events.get(agv.id, []),
                 agv_start_node=agv.start_node,
                 t=t,
             )
-            active_states.append((agv, pos, state_label, active_record, active_progress))
+            active_states.append((agv, pos, state_label, active_event))
 
         # 先画所有 AGV 的未来规划路径，再画 AGV 图标，避免高亮线盖住小车。
-        for agv, _, _, active_record, active_progress in active_states:
-            if active_record is not None:
-                draw_remaining_planned_path(
-                    ax=ax,
-                    graph=graph,
-                    edge_geometry=edge_geometry,
-                    path=active_record["path"],
-                    progress=active_progress,
-                )
+        for _, _, _, active_event in active_states:
+            draw_remaining_route(
+                ax=ax,
+                edge_geometry=edge_geometry,
+                route_edges=route_edges,
+                active_event=active_event,
+                t=t,
+            )
 
-        for agv_index, (agv, pos, state_label, _, _) in enumerate(active_states):
+        for agv_index, (agv, pos, state_label, _) in enumerate(active_states):
             x, y = pos
             agv_color = get_agv_color(agv.id, agv_index)
             ax.scatter(
@@ -405,7 +562,7 @@ def main():
                 bbox=dict(facecolor="white", edgecolor="none", alpha=0.7),
             )
 
-        ax.set_title(f"AGV Dispatch Animation | Policy: {args.policy} | t = {t:.1f} s")
+        ax.set_title(f"AGV Dispatch Animation | {run_id} | t = {t:.1f} s")
         ax.set_axis_off()
         ax.set_aspect("equal")
         ax.set_xlim(x_min - pad_x, x_max + pad_x)
@@ -419,13 +576,15 @@ def main():
         repeat=True,
     )
 
-    output_dir = PROJECT_ROOT / "outputs"
-    output_dir.mkdir(exist_ok=True)
-    output_file = output_dir / f"v01_animation_{args.policy}.gif"
+    output_file = Path(args.output) if args.output else run_dir / "figures" / "animation.gif"
+    if not output_file.is_absolute():
+        output_file = PROJECT_ROOT / output_file
+    output_file.parent.mkdir(parents=True, exist_ok=True)
     ani.save(output_file, writer="pillow", fps=max(1, int(1000 / args.interval)))
     plt.close(fig)
 
     print(f"动画已保存：{output_file}")
+    print("动画数据源：route_edges.csv + route_waits.csv")
 
 
 if __name__ == "__main__":

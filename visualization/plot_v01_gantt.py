@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -13,24 +14,54 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
+def resolve_run_dir(run_dir_arg: str | None) -> Path:
+    if run_dir_arg:
+        run_dir = Path(run_dir_arg)
+        if not run_dir.is_absolute():
+            run_dir = PROJECT_ROOT / run_dir
+        return run_dir
+
+    latest_path = PROJECT_ROOT / "outputs" / "latest_run.json"
+    if not latest_path.exists():
+        raise FileNotFoundError(
+            f"Missing file: {latest_path}\n"
+            "Please run experiments/run_v01.py first, or pass --run-dir."
+        )
+    with latest_path.open("r", encoding="utf-8") as f:
+        latest = json.load(f)
+    return Path(latest["run_dir"])
+
+
+def read_run_id(run_dir: Path) -> str:
+    config_path = run_dir / "config.json"
+    if not config_path.exists():
+        return run_dir.name
+    with config_path.open("r", encoding="utf-8") as f:
+        return json.load(f).get("run_id", run_dir.name)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--policy",
-        choices=["fcfs", "nearest"],
-        default="nearest",
-        help="Dispatch policy to plot",
+        "--run-dir",
+        default=None,
+        help="实验输出目录，例如 outputs/runs/v01_nearest_time_stepwise。默认读取 outputs/latest_run.json。",
     )
-
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="甘特图输出路径。若不指定，保存到 run_dir/figures/gantt.png。",
+    )
     args = parser.parse_args()
 
-    output_dir = PROJECT_ROOT / "outputs"
-    travel_file = output_dir / f"v01_travels_{args.policy}.csv"
+    run_dir = resolve_run_dir(args.run_dir)
+    run_id = read_run_id(run_dir)
+    travel_file = run_dir / "travels.csv"
 
     if not travel_file.exists():
         raise FileNotFoundError(
             f"Missing file: {travel_file}\n"
-            f"Please run: python experiments/run_v01.py --policy {args.policy} --quiet"
+            "Please run experiments/run_v01.py first."
         )
 
     df = pd.read_csv(travel_file)
@@ -87,12 +118,15 @@ def main():
     ax.set_yticklabels(list(y_map.keys()))
     ax.set_xlabel("Simulation Time / s")
     ax.set_ylabel("AGV")
-    ax.set_title(f"AGV Task Execution Gantt Chart | Policy: {args.policy}")
+    ax.set_title(f"AGV Task Execution Gantt Chart | {run_id}")
     ax.grid(axis="x", linestyle="--", alpha=0.4)
 
     fig.tight_layout()
 
-    output_file = output_dir / f"v01_gantt_{args.policy}.png"
+    output_file = Path(args.output) if args.output else run_dir / "figures" / "gantt.png"
+    if not output_file.is_absolute():
+        output_file = PROJECT_ROOT / output_file
+    output_file.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_file, dpi=200)
     plt.close(fig)
 

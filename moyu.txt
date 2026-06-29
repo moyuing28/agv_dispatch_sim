@@ -41,6 +41,16 @@ python smoke_test_arc_demo.py
 
 python experiments/run_v01.py --policy fcfs --quiet
 python experiments/run_v01.py --policy nearest --quiet
+python experiments/run_v01.py --policy nearest --cost-model distance
+python experiments/run_v01.py --policy nearest --cost-model time
+python experiments/run_v01.py --policy nearest --cost-model distance --quiet
+python experiments/run_v01.py --policy nearest --cost-model time --quiet
+python experiments/run_v01.py --policy nearest --cost-model time --traffic-mode reservation --quiet
+python experiments/run_v01.py --policy nearest --cost-model time --traffic-mode none --quiet
+python experiments/run_v01.py --policy nearest --cost-model time --traffic-mode stepwise --quiet
+python experiments/run_v01.py --policy nearest --cost-model time --traffic-mode none --output-level normal --quiet
+python experiments/run_v01.py --policy nearest --cost-model time --traffic-mode stepwise --output-level normal --quiet
+python experiments/run_v01.py --policy nearest --cost-model time --traffic-mode reroute --candidate-paths 5 --output-level normal --quiet
 
 python visualization/plot_road_network.py
 python visualization/plot_road_network.py --hide-edge-lengths
